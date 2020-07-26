@@ -3,81 +3,34 @@
 import re
 import sys
 import csv
+import functools
 import urllib.request
 import argparse
 import sqlite3
 import logging
 import datetime
+import pandas
 import pandas_datareader
 import typing
 
-class Stock:
-	def __init__(self, conn, a, b, c, d, e, f, g, h):
-		self.tickersymbol = a
-		self.name = b
-		_nasdaqlisted = (' - Common Stock' in self.name)
-		if _nasdaqlisted:
-			self.category = c
-			self.testissue = ('N' != d)
-			self.financialstatus = e
-			self.roundlotsize = f
-			self.etf = ('N' != g)
-			self.nextshares = ('N' != h)
-			self.exchange = None
-			self.cqs = None
-			self.nasdaqsymbol = None
-		else:
-			self.exchange = c
-			self.cqs = d
-			self.etf = ('N' != e)
-			self.roundlotsize = f
-			self.testissue = ('N' != g)
-			self.nasdaqsymbol = h
-			self.category = None
-			self.financialstatus = None
-			self.nextshares = None
-		self.c = conn.cursor()
-	def __repr__(self):
-		retval = '<Stock : {}>'.format(self.name)
-		return retval
-	def db_access(self, field, init, delta):
-		assert(isinstance(field, str) and field in ['open', 'high', 'low', 'close', 'volume', 'adjclose'])
-		assert(None == init or isinstance(init, int))
-		assert(None == delta or isinstance(delta, int))
-		_init = (19800101 if None == init else init)
-		_fini = int(datetime.datetime.today().strftime('%Y%m%d') if None == delta else (datetime.datetime.strptime(str(_init), '%Y%m%d') + datetime.timedelta(days=delta)).strftime('%Y%m%d'))
-		if _fini < _init: _init, _fini = _fini, _init
-		retval = c.execute('SELECT date, {} FROM prices WHERE tickersymbol=? AND date>=? AND date <=?'.format(field), [self.tickersymbol, _init, _fini])
-		return tuple(retval.fetchall())
-	def open(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-	def high(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-	def low(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-	def close(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-	def volume(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-	def adjclose(self, init=None, fini=None): return self.db_access(sys._getframe().f_code.co_name, init, fini)
-
+def db_insertprices(tickersymbol:str,
+					df:pandas.core.frame.DataFrame,
+					c:sqlite3.Cursor):
+	_bulk = [x.split(',') for x in df.dropna().to_csv().split()[1:]]
+	_bulk = map(lambda t, o, h, l, c, v: (tickersymbol, int(t.replace('-', '')), float(o), float(h), float(l), float(c), round(float(v))), *zip(*_bulk))
+	_bulk = list(_bulk)
+	_init = datetime.datetime.now()
+	logging.info('_bulk[0] : {}'.format(_bulk[0]))
+	c.executemany('INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?, ?)', _bulk)
+	_fini = datetime.datetime.now()
+	logging.info('{} inserted... ({} sec)'.format(tickersymbol, (_fini - _init)))
 def fetcher(conn:sqlite3.Connection,
-			commonstock:dict,
+			tickersymbols:list,
+			source:str,
 			dryrun:bool=False):
-	def db_insertprices(tickersymbol:str,
-						prices:csv.reader,
-						c:sqlite3.Cursor):
-		if commonstock[tickersymbol].testissue:
-			logging.info('commonstock[{}].testissue == True... not fetching'.format(tickersymbol)) 
-			return
-		_bulk = []
-		for _p in prices:
-			_date = int(datetime.datetime.strptime(_p[0], '%Y-%m-%d').strftime('%Y%m%d'))
-			_bulk.append(tuple([tickersymbol, _date] + _p[1:]))
-		_init = datetime.datetime.now()
-		logging.info('_bulk[0] : {}'.format(_bulk[0]))
-		c.executemany('INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?, ?, ?)', _bulk)
-		_fini = datetime.datetime.now()
-		logging.info('{} inserted... ({} sec)'.format(tickersymbol, (_fini - _init)))
 	c = conn.cursor()
-	stocks = list(commonstock.keys())
-	while 0 < len(stocks):
-		tickersymbol = stocks.pop(0)
+	while 0 < len(tickersymbols):
+		tickersymbol = tickersymbols.pop(0)
 		c.execute('SELECT MAX(date) FROM prices WHERE tickersymbol=?', [tickersymbol])
 		_x = c.fetchall()[0][0]
 		if None == _x:
@@ -92,23 +45,25 @@ def fetcher(conn:sqlite3.Connection,
 		_enddate = _enddate.strftime('%Y-%m-%d')
 		if _startdate == _enddate: continue
 		try:
-			logging.info('dr.data.get_data_yahoo({}, start={}, end={})...'.format(tickersymbol, _startdate, _enddate))
-			_df = pandas_datareader.data.get_data_yahoo(tickersymbol, start=_startdate, end=_enddate)
-			prices_raw = _df.to_csv()
-			prices_txt = prices_raw.splitlines()
-			prices = prices_txt[1:]
-			reader = csv.reader(prices, delimiter=',', quoting=csv.QUOTE_NONE)
-			db_insertprices(tickersymbol, reader, c)
+			if 'stooq' == source:
+				logging.info('pandas_datareader.data.DataReader({}, "stooq")...'.format(tickersymbol))
+				_df = pandas_datareader.data.DataReader(tickersymbol, 'stooq')
+			elif 'yahoo' == source:
+				logging.info('pandas_datareader.DataReader({}, "yahoo")...'.format(tickersymbol))
+				_df = pandas_datareader.DataReader(tickersymbol, 'yahoo', _startdate, _enddate).drop(columns='Adj Close')
+			else:
+				assert False, 'Invalid source ({}).'.format(source)
+			db_insertprices(tickersymbol, _df, c)
 			if not dryrun: conn.commit()
 		except sqlite3.OperationalError:
 			exc = sys.exc_info()
-			if 'database is locked' in str(exc[1]): stocks.append(tickersymbol)
+			if 'database is locked' in str(exc[1]): tickersymbols.append(tickersymbol)
 		except:
 			exc = sys.exc_info()
 			logging.error('{}: sys.exc_info()[:-1] : {} ; {} data not fetched'.format(__name__, exc[:-1], tickersymbol))
 			if 'Service Unavailable' in str(exc[1]):
-				logging.info('{} restored to stocks[]...'.format(tickersymbol))
-				stocks.append(tickersymbol)
+				logging.info('{} restored to tickersymbols[]...'.format(tickersymbol))
+				tickersymbols.append(tickersymbol)
 				logging.info('Sleeping...')
 				time.sleep(15)
 				logging.info('Resuming...')
@@ -119,7 +74,7 @@ def init(dbfilename:str,
 	try:
 		retval = sqlite3.connect(dbfilename, timeout=timeout)
 		c = retval.cursor()
-		c.execute('CREATE TABLE IF NOT EXISTS prices(tickersymbol STR, date INTEGER, open REAL, high REAL, low REAL, close REAL, volume INTEGER, adjclose REAL, UNIQUE(tickersymbol, date))')
+		c.execute('CREATE TABLE IF NOT EXISTS prices(tickersymbol STR, date INTEGER, open REAL, high REAL, low REAL, close REAL, volume INTEGER, UNIQUE(tickersymbol, date))')
 		c.close()
 		logging.info('Successfully connected to database ({})'.format(dbfilename))
 	except:
@@ -131,10 +86,8 @@ def fini(conn:sqlite3.Connection):
 		logging.info('Successfully disconnected from database.')
 	except:
 		logging.critical('Failed to disconnect from database.')
-def update(conn:sqlite3.Connection,
-		   dryrun:bool,
-		   updatetickersymbols:bool=True,
-		   blacklist:typing.Iterable=['NUANV']):
+def fetchtickersymbols(updatetickersymbols:bool=True,
+					   blacklist:typing.Iterable=['NUANV']):
 	if (updatetickersymbols):
 		response = urllib.request.urlopen('ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt')
 		nasdaqlisted_raw = response.read()
@@ -155,15 +108,23 @@ def update(conn:sqlite3.Connection,
 	othertradable = filter(lambda a: ' Common Stock' in a, otherlisted_txt)
 	othertradable = filter(lambda a: all(map(lambda b: not b in a, blacklist)), othertradable)
 	otherreader = csv.reader(othertradable, delimiter='|', quoting=csv.QUOTE_NONE)
-	commonstock = {**{x[0] : Stock(conn, *x) for x in otherreader}, **{x[0] : Stock(conn, *x) for x in nasdaqreader}}
-	fetcher(conn, commonstock, dryrun)
+	retval  = list(map(lambda x: x[0], nasdaqreader))
+	retval += list(map(lambda x: x[0], otherreader))
+	return retval
+def update(conn:sqlite3.Connection,
+		   dryrun:bool,
+		   updatetickersymbols:bool=True,
+		   blacklist:typing.Iterable=['NUANV']):
+	tickersymbols = fetchtickersymbols(updatetickersymbols, blacklist)
+	logging.info('len(tickersymbols)  : {}'.format(len(tickersymbols)))
+	fetcher(conn, tickersymbols, 'yahoo')
 def access(conn:sqlite3.Connection,
 		   tickersymbols:list,
 		   fields:list,
 		   init:int=19800101,
 		   delta:int=0):
-	ohlcva = ['open', 'high', 'low', 'close', 'volume', 'adjclose']
-	assert all([f in ohlcva for f in fields]), 'All fields must be {}.'.format(ohlcva)
+	ohlcv = ['open', 'high', 'low', 'close', 'volume']
+	assert all([f in ohlcv for f in fields]), 'All fields must be {}.'.format(ohlcv)
 	fini = int((datetime.datetime.strptime(str(init), '%Y%m%d') + datetime.timedelta(days=delta)).strftime('%Y%m%d'))
 	if fini < init: init, fini = fini, init
 	c = conn.cursor()
@@ -192,7 +153,7 @@ if __name__ == '__main__':
 	logging.basicConfig(filename='stocksdb.log', format='%(asctime)s %(message)s', datefmt='%Y%m%d %H:%M:%S', level=logging.DEBUG)
 	logging.debug('args : {}'.format(args))
 	conn = init(args.dbfilename, args.timeout)
-	if not conn: sys.exit(1)
+	assert conn, 'Unable to established connection to database!'
 	if args.update: update(conn, args.dryrun)
 	if args.access:
 		tickersymbol = [args.access[0]]
