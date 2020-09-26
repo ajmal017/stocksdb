@@ -53,6 +53,7 @@ def fetcher(conn:sqlite3.Connection,
 				_df = pandas_datareader.DataReader(tickersymbol, 'yahoo', _startdate, _enddate).drop(columns='Adj Close')
 			else:
 				assert False, 'Invalid source ({}).'.format(source)
+			logging.debug('fetcher(): {} : {}..{}'.format(tickersymbol, _startdate, _enddate))
 			db_insertprices(tickersymbol, _df, c)
 			if not dryrun: conn.commit()
 		except sqlite3.OperationalError:
