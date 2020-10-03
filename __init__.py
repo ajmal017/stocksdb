@@ -111,6 +111,7 @@ def fetchtickersymbols(updatetickersymbols:bool=True,
 	otherreader = csv.reader(othertradable, delimiter='|', quoting=csv.QUOTE_NONE)
 	retval  = list(map(lambda x: x[0], nasdaqreader))
 	retval += list(map(lambda x: x[0], otherreader))
+	retval = list(filter(lambda x: not re.search('\.', x), retval))
 	return retval
 def update(conn:sqlite3.Connection,
 		   dryrun:bool,
